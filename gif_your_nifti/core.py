@@ -6,7 +6,7 @@ import numpy as np
 from matplotlib.cm import get_cmap
 from imageio import mimwrite
 from skimage.transform import resize
-
+import gif_your_nifti.config as cfg
 
 def parse_filename(filepath):
     """Parse input file path into directory, basename and extension.
@@ -46,24 +46,36 @@ def load_and_prepare_image(filename, size=1):
     Returns
     -------
     out_img: numpy array
-
     """
     # Load NIfTI file
-    data = nb.load(filename).get_data()
+    data = nb.load(filename).get_fdata(dtype=np.float32)
 
     # Pad data array with zeros to make the shape isometric
-    maximum = np.max(data.shape)
+    dShape = data.shape
+    maximum = np.max(dShape[0:3])
 
-    out_img = np.zeros([maximum] * 3)
+    if len(dShape) > 3:
+        out_img = np.zeros([maximum, maximum, maximum, dShape[3]],
+                           dtype=np.float32)
+    else:
+        out_img = np.zeros([maximum] * 3, dtype=np.float32)
 
-    a, b, c = data.shape
-    x, y, z = (list(data.shape) - maximum) / -2
+    a, b, c = dShape[0:3]
+    x, y, z = (list(dShape[0:3]) - maximum) / -2
 
-    out_img[int(x):a + int(x),
-            int(y):b + int(y),
-            int(z):c + int(z)] = data
+    if len(dShape)>3:
+        out_img[int(x):a + int(x),
+                int(y):b + int(y),
+                int(z):c + int(z), :] = data
+    else:
+        out_img[int(x):a + int(x),
+                int(y):b + int(y),
+                int(z):c + int(z)] = data
+    del data
 
     out_img /= out_img.max()  # scale image values between 0-1
+    out_img *= 255
+    out_img = out_img.astype(np.uint8)
 
     # Resize image by the following factor
     if size != 1:
@@ -71,10 +83,10 @@ def load_and_prepare_image(filename, size=1):
 
     maximum = int(maximum * size)
 
-    return out_img, maximum
+    return out_img, maximum, dShape
 
 
-def create_mosaic_normal(out_img, maximum):
+def create_mosaic_normal(out_img, maximum, origShape=[], slices=cfg.slices, slicesOrder=cfg.slicesOrder):
     """Create grayscale image.
 
     Parameters
@@ -87,7 +99,28 @@ def create_mosaic_normal(out_img, maximum):
     new_img: numpy array
 
     """
-    new_img = np.array(
+    if len(origShape)>3:
+        if slices==cfg.slices:
+            slices=[int(origShape[0]/2), int(origShape[1]/2), int(origShape[2]*2/3)]
+
+        if slicesOrder=='csa':
+            new_img = np.array(
+                [np.hstack((
+                    np.hstack((
+                        np.flip(out_img[slices[0], :, :, i], 1).T,
+                        np.flip(out_img[:, slices[1], :, maximum - i - 1], 1).T)),
+                        np.flip(out_img[:, :, slices[2], maximum - i - 1], 1).T))
+                        for i in range(maximum)])
+        elif slicesOrder=='cas':
+            new_img = np.array(
+                [np.hstack((
+                    np.hstack((
+                        np.flip(out_img[slices[0], :, :, i], 1).T,
+                        np.flip(out_img[:, :, slices[2], maximum - i - 1], 1).T)),
+                        np.flip(out_img[:, slices[1], :, maximum - i - 1], 1).T))
+                        for i in range(maximum)])
+    else:
+        new_img = np.array(
         [np.hstack((
             np.hstack((
                 np.flip(out_img[i, :, :], 1).T,
@@ -166,7 +199,7 @@ def create_mosaic_RGB(out_img1, out_img2, out_img3, maximum):
     return out_img
 
 
-def write_gif_normal(filename, size=1, fps=18):
+def write_gif_normal(filename, size=1, fps=18, slices=cfg.slices, slicesOrder=cfg.slicesOrder, out_filename=None):
     """Procedure for writing grayscale image.
 
     Parameters
@@ -180,20 +213,25 @@ def write_gif_normal(filename, size=1, fps=18):
 
     """
     # Load NIfTI and put it in right shape
-    out_img, maximum = load_and_prepare_image(filename, size)
+    out_img, maximum, origShape = load_and_prepare_image(filename, 1)
 
     # Create output mosaic
-    new_img = create_mosaic_normal(out_img, maximum)
+    new_img = create_mosaic_normal(out_img, maximum, origShape,
+                                   slices=slices,
+                                   slicesOrder=slicesOrder)
+    del out_img
 
     # Figure out extension
     ext = '.{}'.format(parse_filename(filename)[2])
 
-    # Write gif file
-    mimwrite(filename.replace(ext, '.gif'), new_img,
+    if not out_filename:
+        out_filename = filename.replace(ext, '.gif')
+
+    mimwrite(out_filename, new_img,
              format='gif', fps=int(fps * size))
 
 
-def write_gif_depth(filename, size=1, fps=18):
+def write_gif_depth(filename, size=1, fps=18, out_filename=None):
     """Procedure for writing depth image.
 
     The image shows you in color what the value of the next slice will be. If
@@ -212,7 +250,10 @@ def write_gif_depth(filename, size=1, fps=18):
 
     """
     # Load NIfTI and put it in right shape
-    out_img, maximum = load_and_prepare_image(filename, size)
+    out_img, maximum, origShape = load_and_prepare_image(filename, size)
+
+    if len(origShape)>3:
+        raise Exception("Depth is not working with 4D data")
 
     # Create output mosaic
     new_img = create_mosaic_depth(out_img, maximum)
@@ -221,8 +262,10 @@ def write_gif_depth(filename, size=1, fps=18):
     ext = '.{}'.format(parse_filename(filename)[2])
 
     # Write gif file
-    mimwrite(filename.replace(ext, '_depth.gif'), new_img,
-             format='gif', fps=int(fps * size))
+    if not out_filename:
+        out_filename = filename.replace(ext, '_depth.gif')
+
+    mimwrite(out_filename, new_img, format='gif', fps=int(fps * size))
 
 
 def write_gif_rgb(filename1, filename2, filename3, size=1, fps=18):
@@ -263,7 +306,7 @@ def write_gif_rgb(filename1, filename2, filename3, size=1, fps=18):
     mimwrite(out_path, new_img, format='gif', fps=int(fps * size))
 
 
-def write_gif_pseudocolor(filename, size=1, fps=18, colormap='hot'):
+def write_gif_pseudocolor(filename, size=1, fps=18, colormap='hot', slices=cfg.slices, slicesOrder=cfg.slicesOrder, out_filename=None):
     """Procedure for writing pseudo color image.
 
     The colormap can be any colormap from matplotlib.
@@ -281,18 +324,27 @@ def write_gif_pseudocolor(filename, size=1, fps=18, colormap='hot'):
 
     """
     # Load NIfTI and put it in right shape
-    out_img, maximum = load_and_prepare_image(filename, size)
+    out_img, maximum, origShape = load_and_prepare_image(filename, 1)
 
     # Create output mosaic
-    new_img = create_mosaic_normal(out_img, maximum)
+    new_img = create_mosaic_normal(out_img, maximum, origShape,
+                                   slices=slices,
+                                   slicesOrder=slicesOrder)
 
     # Transform values according to the color map
     cmap = get_cmap(colormap)
     color_transformed = [cmap(new_img[i, ...]) for i in range(maximum)]
     cmap_img = np.delete(color_transformed, 3, 3)
 
+    cmap_img /= cmap_img.max()  # scale image values between 0-1
+    cmap_img *= 255
+    cmap_img = cmap_img.astype(np.uint8)
+
     # Figure out extension
     ext = '.{}'.format(parse_filename(filename)[2])
+
+    if not out_filename:
+        out_filename = filename.replace(ext, '_{}.gif'.format(colormap))
+
     # Write gif file
-    mimwrite(filename.replace(ext, '_{}.gif'.format(colormap)),
-             cmap_img, format='gif', fps=int(fps * size))
+    mimwrite(out_filename, cmap_img, format='gif', fps=int(fps * size))
